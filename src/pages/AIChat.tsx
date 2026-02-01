@@ -26,6 +26,7 @@ What would you like to know? / 您想了解什么？`,
     },
   ]);
   const [inputMessage, setInputMessage] = useState('');
+  const [isSending, setIsSending] = useState(false);
 
   // API base URL: local dev can set VITE_API_BASE_URL; otherwise use your Aliyun backend
   const API_BASE = 'https://api.fayevalentine.dpdns.org';
@@ -48,9 +49,11 @@ What would you like to know? / 您想了解什么？`,
   ];
 
   const handleSendMessage = async () => {
+    if (isSending) return;          // ⭐ 防止重复发送
     const text = inputMessage.trim();
     if (!text) return;
-
+  
+    setIsSending(true);  
     // 1) 先加入用户消息
     const userMessage: Message = {
       id: Date.now(), // 用时间戳做 id，更稳
@@ -133,6 +136,9 @@ What would you like to know? / 您想了解什么？`,
 
       setMessages((prev) => prev.map((m) => (m.id === thinkingId ? failMessage : m)));
     }
+    finally {
+  setIsSending(false);      // ⭐ 就加在这里
+    }  
   };
 
   const handleSuggestedQuestion = (question: { en: string; zh: string }) => {
