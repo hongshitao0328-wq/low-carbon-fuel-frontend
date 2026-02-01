@@ -28,7 +28,8 @@ What would you like to know? / 您想了解什么？`,
   const [inputMessage, setInputMessage] = useState('');
 
   // API base URL: local dev can set VITE_API_BASE_URL; otherwise use your Aliyun backend
-  
+  const API_BASE = import.meta.env.VITE_API_BASE || '';
+
 
 
 
@@ -90,7 +91,7 @@ What would you like to know? / 您想了解什么？`,
         { role: 'user', content: text },
       ];
 
-      const resp = await fetch('/api/chat', {
+      const resp = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: payloadMessages }),
