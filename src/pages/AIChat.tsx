@@ -28,7 +28,8 @@ What would you like to know? / 您想了解什么？`,
   const [inputMessage, setInputMessage] = useState('');
 
   // API base URL: local dev can set VITE_API_BASE_URL; otherwise use your Aliyun backend
-  const API_BASE = 'https://fuel-api-proxy.hongshitao0328.workers.dev';
+  const API_BASE = "";
+
 
 
   const suggestedQuestions = [
