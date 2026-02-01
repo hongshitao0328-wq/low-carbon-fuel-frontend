@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { MessageSquare, Send, Paperclip, Plus, Bot, User as UserIcon } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Send, Paperclip, Plus, Bot, User as UserIcon } from 'lucide-react';
 
 interface Message {
   id: number;
@@ -25,15 +25,24 @@ What would you like to know? / 您想了解什么？`,
       timestamp: '10:30 AM',
     },
   ]);
+
   const [inputMessage, setInputMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
 
-  // API base URL: local dev can set VITE_API_BASE_URL; otherwise use your Aliyun backend
+  // ✅ 固定 API（你已上线域名）
   const API_BASE = 'https://api.fayevalentine.dpdns.org';
 
+  // ✅ 硬锁：彻底防止“瞬间双触发”
+  const sendingRef = useRef(false);
 
+  // ✅ 维护最新 messages，避免闭包拿到旧 state
+  const messagesRef = useRef<Message[]>(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
-
+  // ✅ 可选：允许取消上一次请求（如果你想“新消息取消旧请求”，打开注释）
+  const abortRef = useRef<AbortController | null>(null);
 
   const suggestedQuestions = [
     { en: "Check today's prices", zh: '查看今日价格' },
@@ -48,60 +57,75 @@ What would you like to know? / 您想了解什么？`,
     { title: 'Forecast ammonia', titleZh: '预测氨价格', time: '3 days ago' },
   ];
 
+  const nowHM = () =>
+    new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
   const handleSendMessage = async () => {
-    if (isSending) return;          // ⭐ 防止重复发送
+    // ✅ 硬锁：防止同一瞬间被触发两次
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
+
+    // ✅ 如果你希望“新发送取消旧请求”，打开这两行
+    // abortRef.current?.abort();
+    // abortRef.current = null;
+
     const text = inputMessage.trim();
-    if (!text) return;
-  
-    setIsSending(true);  
+    if (!text) {
+      sendingRef.current = false;
+      setIsSending(false);
+      return;
+    }
+
     // 1) 先加入用户消息
     const userMessage: Message = {
-      id: Date.now(), // 用时间戳做 id，更稳
+      id: Date.now(),
       type: 'user',
       content: text,
-      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      timestamp: nowHM(),
     };
 
     setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
 
-    // 2) 加一个“思考中”占位消息（先显示出来）
+    // 2) thinking 占位
     const thinkingId = userMessage.id + 1;
     const thinkingMessage: Message = {
       id: thinkingId,
       type: 'ai',
       content: '🤖 Thinking... / 正在思考中...',
-      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      timestamp: nowHM(),
     };
+
     setMessages((prev) => [...prev, thinkingMessage]);
 
-    try {
-      // 3) 把当前对话历史组织成 LLM 常用 messages 结构
-      //    这里我们把你 UI 的 messages 转成 {role, content}
-      const payloadMessages = [
-        {
-          role: 'system',
-          content:
-            'You are a marine fuel price assistant. Answer bilingually (English/Chinese) when appropriate.',
-        },
-        // 注意：这里用的是 state 里的 messages（可能不含刚刚 setMessages 的最新值），
-        // 但我们会手动把本次 user text 再追加一遍，所以不会丢。
-        ...messages
-          .filter((m) => m.type === 'user' || m.type === 'ai')
-          .map((m) => ({
-            role: m.type === 'user' ? 'user' : 'assistant',
-            content: m.content,
-          })),
-        { role: 'user', content: text },
-      ];
+    // 3) 组织 payloadMessages（使用最新 messagesRef，且过滤掉初始欢迎语）
+    const payloadMessages = [
+      {
+        role: 'system',
+        content:
+          'You are a marine fuel price assistant. Answer bilingually (English/Chinese) when appropriate.',
+      },
+      ...messagesRef.current
+        .filter((m) => m.id !== 1) // ✅ 不把初始欢迎语传给后端
+        .filter((m) => m.type === 'user' || m.type === 'ai')
+        .map((m) => ({
+          role: m.type === 'user' ? 'user' : 'assistant',
+          content: m.content,
+        })),
+      { role: 'user', content: text },
+    ];
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
       const resp = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: payloadMessages }),
+        signal: controller.signal,
       });
-
-
 
       if (!resp.ok) {
         const errText = await resp.text();
@@ -110,6 +134,7 @@ What would you like to know? / 您想了解什么？`,
 
       const data = await resp.json();
 
+      // ✅ 只取一个字段，不拼接
       const answerText =
         data?.content ??
         data?.reply ??
@@ -118,27 +143,33 @@ What would you like to know? / 您想了解什么？`,
         'No response / 无返回内容';
 
       const aiMessage: Message = {
-        id: thinkingId, // 用同一个 id 覆盖“thinking”
+        id: thinkingId,
         type: 'ai',
         content: answerText,
-        timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        timestamp: nowHM(),
       };
 
-      // 4) 用真实回答替换 thinkingMessage
+      // 用真实回答替换 thinking
       setMessages((prev) => prev.map((m) => (m.id === thinkingId ? aiMessage : m)));
     } catch (e: any) {
+      const msg =
+        e?.name === 'AbortError'
+          ? '❌ 已取消请求（Abort）'
+          : `❌ API 调用失败：${String(e?.message ?? e)}`;
+
       const failMessage: Message = {
         id: thinkingId,
         type: 'ai',
-        content: `❌ API 调用失败：${String(e?.message ?? e)}`,
-        timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        content: msg,
+        timestamp: nowHM(),
       };
 
       setMessages((prev) => prev.map((m) => (m.id === thinkingId ? failMessage : m)));
+    } finally {
+      abortRef.current = null;
+      sendingRef.current = false;
+      setIsSending(false);
     }
-    finally {
-  setIsSending(false);      // ⭐ 就加在这里
-    }  
   };
 
   const handleSuggestedQuestion = (question: { en: string; zh: string }) => {
@@ -253,19 +284,36 @@ What would you like to know? / 您想了解什么？`,
                 <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
                   <Paperclip className="w-5 h-5" />
                 </button>
+
                 <input
                   type="text"
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                  onKeyDown={(e) => {
+                    // ✅ IME 输入法保护：正在选词时不发送
+                    if ((e as any).isComposing) return;
+
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
                   placeholder="Type your question... / 输入您的问题..."
                   className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E40AF] focus:border-transparent"
                 />
+
                 <button
                   onClick={handleSendMessage}
-                  className="px-4 py-2 bg-[#1E40AF] text-white rounded-lg hover:bg-blue-800 transition-colors flex items-center gap-2"
+                  disabled={isSending}
+                  className={`px-4 py-2 rounded-lg transition-colors flex items-center gap-2
+                    ${
+                      isSending
+                        ? 'bg-gray-400 cursor-not-allowed text-white'
+                        : 'bg-[#1E40AF] hover:bg-blue-800 text-white'
+                    }
+                  `}
                 >
-                  <span>Send</span>
+                  <span>{isSending ? 'Sending...' : 'Send'}</span>
                   <Send className="w-4 h-4" />
                 </button>
               </div>
