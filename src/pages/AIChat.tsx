@@ -32,10 +32,10 @@ What would you like to know? / 您想了解什么？`,
   // ✅ 固定 API（你已上线域名）
   const API_BASE = 'https://api.fayevalentine.dpdns.org';
 
-  // ✅ 硬锁：彻底防止“瞬间双触发”
+  // ✅ 硬锁：防止瞬间双触发
   const sendingRef = useRef(false);
 
-  // ✅ 输入法 composing 保护（比 nativeEvent.isComposing 更稳）
+  // ✅ 输入法 composing 保护（最稳）
   const isComposingRef = useRef(false);
 
   // ✅ 维护最新 messages，避免闭包拿到旧 state
@@ -79,7 +79,7 @@ What would you like to know? / 您想了解什么？`,
     if (last && last.text === text && now - last.t < 400) return;
     lastSendRef.current = { text, t: now };
 
-    // ✅ 硬锁：防止同一瞬间被触发两次
+    // ✅ 硬锁：防止瞬间双触发
     if (sendingRef.current) return;
     sendingRef.current = true;
     setIsSending(true);
@@ -88,7 +88,7 @@ What would you like to know? / 您想了解什么？`,
     // abortRef.current?.abort();
     // abortRef.current = null;
 
-    // 1) 先加入用户消息
+    // 1) 先加入用户消息（UI）
     const userMessage: Message = {
       id: Date.now(),
       type: 'user',
@@ -99,7 +99,7 @@ What would you like to know? / 您想了解什么？`,
     setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
 
-    // 2) thinking 占位
+    // 2) thinking 占位（UI）
     const thinkingId = userMessage.id + 1;
     const thinkingMessage: Message = {
       id: thinkingId,
@@ -107,24 +107,30 @@ What would you like to know? / 您想了解什么？`,
       content: '🤖 Thinking... / 正在思考中...',
       timestamp: nowHM(),
     };
-
     setMessages((prev) => [...prev, thinkingMessage]);
 
-    // 3) 组织 payloadMessages（使用最新 messagesRef，且过滤掉初始欢迎语）
+    // 3) ✅ 组织 payloadMessages（关键修复）
+    // - 明确用 “旧历史 messagesRef.current + 本次 userMessage” 构造
+    // - 不再额外 append { role:'user', content:text }（避免重复）
+    // - thinking 不进入 payload（避免污染上下文）
+    const historyForPayload: Message[] = [
+      ...messagesRef.current.filter((m) => m.id !== 1), // 不把初始欢迎语传给后端
+      userMessage, // ✅ 明确只加入一次本次 user
+    ];
+
     const payloadMessages = [
       {
         role: 'system',
         content:
           'You are a marine fuel price assistant. Answer bilingually (English/Chinese) when appropriate.',
       },
-      ...messagesRef.current
-        .filter((m) => m.id !== 1) // ✅ 不把初始欢迎语传给后端
+      ...historyForPayload
         .filter((m) => m.type === 'user' || m.type === 'ai')
+        .filter((m) => m.id !== thinkingId) // ✅ thinking 永远不入 payload
         .map((m) => ({
           role: m.type === 'user' ? 'user' : 'assistant',
           content: m.content,
         })),
-      { role: 'user', content: text },
     ];
 
     const controller = new AbortController();
@@ -160,7 +166,7 @@ What would you like to know? / 您想了解什么？`,
         timestamp: nowHM(),
       };
 
-      // 用真实回答替换 thinking
+      // ✅ 用真实回答替换 thinking
       setMessages((prev) => prev.map((m) => (m.id === thinkingId ? aiMessage : m)));
     } catch (e: any) {
       const msg =
@@ -242,7 +248,9 @@ What would you like to know? / 您想了解什么？`,
               {messages.map((message) => (
                 <div
                   key={message.id}
-                  className={`flex gap-3 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                  className={`flex gap-3 ${
+                    message.type === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
                 >
                   {message.type === 'ai' && (
                     <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
