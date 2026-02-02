@@ -8,6 +8,8 @@ interface Message {
   timestamp: string;
 }
 
+type RoleMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
 export function AIChat() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -44,11 +46,15 @@ What would you like to know? / 您想了解什么？`,
     messagesRef.current = messages;
   }, [messages]);
 
-  // ✅ 可选：允许取消上一次请求（如果你想“新消息取消旧请求”，打开注释）
+  // ✅ 可选：允许取消上一次请求（如果你想“新消息取消旧请求”，可打开）
   const abortRef = useRef<AbortController | null>(null);
 
   // ✅ 去重阀门：同一文本在 400ms 内只发一次（防抖/误触/连按 Enter）
   const lastSendRef = useRef<{ text: string; t: number } | null>(null);
+
+  // ===== 可调参数 =====
+  // ✅ 只保留最近 N 条历史（不含 system），避免上下文越来越长
+  const MAX_HISTORY = 20;
 
   const suggestedQuestions = [
     { en: "Check today's prices", zh: '查看今日价格' },
@@ -65,6 +71,73 @@ What would you like to know? / 您想了解什么？`,
 
   const nowHM = () =>
     new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+  // ✅ 去复读净化：防止“复读内容”被喂回模型而自我强化
+  function dedupAssistantText(s: string) {
+    let t = (s ?? '').trim();
+    if (!t) return t;
+
+    // 1) 整段复制一遍：前半 == 后半
+    if (t.length >= 8 && t.length % 2 === 0) {
+      const half = t.slice(0, t.length / 2);
+      if (half === t.slice(t.length / 2)) {
+        t = half.trim();
+      }
+    }
+
+    // 2) 连续重复句子（中文/英文标点都兼容）
+    const parts = t.split(/(?<=[。！？!?])\s*/).filter(Boolean);
+    if (parts.length <= 1) return t;
+
+    const out: string[] = [];
+    for (const p of parts) {
+      if (out.length === 0 || out[out.length - 1] !== p) out.push(p);
+    }
+    return out.join('').trim();
+  }
+
+  // ✅ 构造发给后端的 messages（终极版：去污染 + 截断 + 不重复）
+  function buildPayloadMessages(userMessage: Message, thinkingId: number): RoleMessage[] {
+    // 1) 基于“旧历史 + 本次 userMessage”构造（确保 user 只出现一次）
+    const history: Message[] = [
+      ...messagesRef.current.filter((m) => m.id !== 1), // 去掉欢迎语
+      userMessage,
+    ];
+
+    // 2) 去掉 thinking（永远不入 payload）
+    const cleaned = history.filter((m) => m.id !== thinkingId);
+
+    // 3) 丢弃空消息
+    const nonEmpty = cleaned.filter((m) => (m.content ?? '').trim().length > 0);
+
+    // 4) 历史截断（保留最近 MAX_HISTORY 条）
+    const trimmed = nonEmpty.slice(-MAX_HISTORY);
+
+    // 5) 映射到 role，并对 assistant 做去复读净化
+    const roleMsgs: RoleMessage[] = trimmed.map((m) => {
+      const role = m.type === 'user' ? 'user' : 'assistant';
+      const content = role === 'assistant' ? dedupAssistantText(m.content) : m.content;
+      return { role, content };
+    });
+
+    // 6) 额外再做一层“相邻重复去除”（避免 user 连续相同/assistant 连续相同）
+    const finalMsgs: RoleMessage[] = [];
+    for (const msg of roleMsgs) {
+      const prev = finalMsgs[finalMsgs.length - 1];
+      if (prev && prev.role === msg.role && prev.content === msg.content) continue;
+      finalMsgs.push(msg);
+    }
+
+    // 7) system + cleaned history
+    return [
+      {
+        role: 'system',
+        content:
+          'You are a marine fuel price assistant. Answer bilingually (English/Chinese) when appropriate. Avoid repeating the same sentence twice.',
+      },
+      ...finalMsgs,
+    ];
+  }
 
   const handleSendMessage = async () => {
     const text = inputMessage.trim();
@@ -84,11 +157,11 @@ What would you like to know? / 您想了解什么？`,
     sendingRef.current = true;
     setIsSending(true);
 
-    // ✅ 如果你希望“新发送取消旧请求”，打开这两行
+    // （可选）新发送取消旧请求
     // abortRef.current?.abort();
     // abortRef.current = null;
 
-    // 1) 先加入用户消息（UI）
+    // 1) UI：加入用户消息
     const userMessage: Message = {
       id: Date.now(),
       type: 'user',
@@ -99,7 +172,7 @@ What would you like to know? / 您想了解什么？`,
     setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
 
-    // 2) thinking 占位（UI）
+    // 2) UI：thinking 占位
     const thinkingId = userMessage.id + 1;
     const thinkingMessage: Message = {
       id: thinkingId,
@@ -109,29 +182,8 @@ What would you like to know? / 您想了解什么？`,
     };
     setMessages((prev) => [...prev, thinkingMessage]);
 
-    // 3) ✅ 组织 payloadMessages（关键修复）
-    // - 明确用 “旧历史 messagesRef.current + 本次 userMessage” 构造
-    // - 不再额外 append { role:'user', content:text }（避免重复）
-    // - thinking 不进入 payload（避免污染上下文）
-    const historyForPayload: Message[] = [
-      ...messagesRef.current.filter((m) => m.id !== 1), // 不把初始欢迎语传给后端
-      userMessage, // ✅ 明确只加入一次本次 user
-    ];
-
-    const payloadMessages = [
-      {
-        role: 'system',
-        content:
-          'You are a marine fuel price assistant. Answer bilingually (English/Chinese) when appropriate.',
-      },
-      ...historyForPayload
-        .filter((m) => m.type === 'user' || m.type === 'ai')
-        .filter((m) => m.id !== thinkingId) // ✅ thinking 永远不入 payload
-        .map((m) => ({
-          role: m.type === 'user' ? 'user' : 'assistant',
-          content: m.content,
-        })),
-    ];
+    // 3) payload（终极版构造）
+    const payloadMessages = buildPayloadMessages(userMessage, thinkingId);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -151,13 +203,16 @@ What would you like to know? / 您想了解什么？`,
 
       const data = await resp.json();
 
-      // ✅ 只取一个字段，不拼接
-      const answerText =
+      // ✅ 只取一个字段
+      const rawAnswer =
         data?.content ??
         data?.reply ??
         data?.message?.content ??
         data?.choices?.[0]?.message?.content ??
         'No response / 无返回内容';
+
+      // ✅ 最后再对“最终输出”做一次去复读（双保险）
+      const answerText = dedupAssistantText(String(rawAnswer));
 
       const aiMessage: Message = {
         id: thinkingId,
@@ -166,7 +221,7 @@ What would you like to know? / 您想了解什么？`,
         timestamp: nowHM(),
       };
 
-      // ✅ 用真实回答替换 thinking
+      // 用真实回答替换 thinking
       setMessages((prev) => prev.map((m) => (m.id === thinkingId ? aiMessage : m)));
     } catch (e: any) {
       const msg =
@@ -200,7 +255,15 @@ What would you like to know? / 您想了解什么？`,
           {/* Left Column - Conversation History */}
           <div className="w-80 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col">
             <div className="p-4 border-b border-gray-200">
-              <button className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-[#1E40AF] text-white rounded-lg hover:bg-blue-800 transition-colors">
+              <button
+                type="button"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-[#1E40AF] text-white rounded-lg hover:bg-blue-800 transition-colors"
+                onClick={() => {
+                  // ✅ 新对话：清空污染历史（只保留欢迎语）
+                  setMessages((prev) => [prev[0]]);
+                  setInputMessage('');
+                }}
+              >
                 <Plus className="w-5 h-5" />
                 New Chat / 新对话
               </button>
@@ -212,6 +275,7 @@ What would you like to know? / 您想了解什么？`,
               <div className="space-y-2">
                 {conversations.map((conv, index) => (
                   <button
+                    type="button"
                     key={index}
                     className="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors border border-transparent hover:border-gray-200"
                   >
@@ -287,6 +351,7 @@ What would you like to know? / 您想了解什么？`,
               <div className="flex gap-2 flex-wrap">
                 {suggestedQuestions.map((question, index) => (
                   <button
+                    type="button"
                     key={index}
                     onClick={() => handleSuggestedQuestion(question)}
                     className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-full text-sm hover:bg-blue-100 transition-colors"
