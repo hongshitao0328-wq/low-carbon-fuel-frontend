@@ -35,6 +35,9 @@ What would you like to know? / 您想了解什么？`,
   // ✅ 硬锁：彻底防止“瞬间双触发”
   const sendingRef = useRef(false);
 
+  // ✅ 输入法 composing 保护（比 nativeEvent.isComposing 更稳）
+  const isComposingRef = useRef(false);
+
   // ✅ 维护最新 messages，避免闭包拿到旧 state
   const messagesRef = useRef<Message[]>(messages);
   useEffect(() => {
@@ -43,6 +46,9 @@ What would you like to know? / 您想了解什么？`,
 
   // ✅ 可选：允许取消上一次请求（如果你想“新消息取消旧请求”，打开注释）
   const abortRef = useRef<AbortController | null>(null);
+
+  // ✅ 去重阀门：同一文本在 400ms 内只发一次（防抖/误触/连按 Enter）
+  const lastSendRef = useRef<{ text: string; t: number } | null>(null);
 
   const suggestedQuestions = [
     { en: "Check today's prices", zh: '查看今日价格' },
@@ -61,6 +67,18 @@ What would you like to know? / 您想了解什么？`,
     new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
   const handleSendMessage = async () => {
+    const text = inputMessage.trim();
+    if (!text) return;
+
+    // ✅ 输入法选词中不发送
+    if (isComposingRef.current) return;
+
+    // ✅ 400ms 内相同内容直接丢弃（非常稳）
+    const now = Date.now();
+    const last = lastSendRef.current;
+    if (last && last.text === text && now - last.t < 400) return;
+    lastSendRef.current = { text, t: now };
+
     // ✅ 硬锁：防止同一瞬间被触发两次
     if (sendingRef.current) return;
     sendingRef.current = true;
@@ -69,13 +87,6 @@ What would you like to know? / 您想了解什么？`,
     // ✅ 如果你希望“新发送取消旧请求”，打开这两行
     // abortRef.current?.abort();
     // abortRef.current = null;
-
-    const text = inputMessage.trim();
-    if (!text) {
-      sendingRef.current = false;
-      setIsSending(false);
-      return;
-    }
 
     // 1) 先加入用户消息
     const userMessage: Message = {
@@ -278,10 +289,19 @@ What would you like to know? / 您想了解什么？`,
               </div>
             </div>
 
-            {/* Input Area */}
+            {/* Input Area (方案A：只用 form onSubmit 发送) */}
             <div className="p-4 border-t border-gray-200">
-              <div className="flex gap-2">
-                <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSendMessage();
+                }}
+              >
+                <button
+                  type="button"
+                  className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                >
                   <Paperclip className="w-5 h-5" />
                 </button>
 
@@ -289,21 +309,18 @@ What would you like to know? / 您想了解什么？`,
                   type="text"
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    // ✅ IME 输入法保护：正在选词时不发送
-                    if ((e as any).isComposing) return;
-
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
+                  onCompositionStart={() => {
+                    isComposingRef.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    isComposingRef.current = false;
                   }}
                   placeholder="Type your question... / 输入您的问题..."
                   className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E40AF] focus:border-transparent"
                 />
 
                 <button
-                  onClick={handleSendMessage}
+                  type="submit"
                   disabled={isSending}
                   className={`px-4 py-2 rounded-lg transition-colors flex items-center gap-2
                     ${
@@ -316,7 +333,7 @@ What would you like to know? / 您想了解什么？`,
                   <span>{isSending ? 'Sending...' : 'Send'}</span>
                   <Send className="w-4 h-4" />
                 </button>
-              </div>
+              </form>
             </div>
           </div>
         </div>
